@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                                   QLineEdit, QSpinBox, QPushButton, QFormLayout)
+                                   QLineEdit, QSpinBox, QPushButton, QFormLayout,
+                                   QCheckBox)
 from PySide6.QtCore import Qt
 
 
@@ -30,6 +31,9 @@ class AddDialog(QDialog):
 
         layout.addLayout(form)
 
+        self.deploy_check = QCheckBox("添加到部署区（预约播放，不加入待播队列）")
+        layout.addWidget(self.deploy_check)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         cancel_btn = QPushButton("取消")
@@ -49,4 +53,5 @@ class AddDialog(QDialog):
             "song_name": self.song_input.text().strip(),
             "sender_name": self.sender_input.text().strip(),
             "battery": self.battery_input.value(),
+            "to_deploy": self.deploy_check.isChecked(),
         }

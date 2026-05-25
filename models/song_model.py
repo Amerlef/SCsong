@@ -1,9 +1,14 @@
 import sqlite3
 import os
-from datetime import datetime
+import sys
 from typing import Optional
 
-DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+DB_DIR = os.path.join(_BASE_DIR, "data")
 DB_PATH = os.path.join(DB_DIR, "songs.db")
 
 
@@ -29,6 +34,8 @@ def init_db():
             sort_order INTEGER DEFAULT 0
         )
     """)
+    # Migrate old 'suspended' status to 'deploy'
+    conn.execute("UPDATE song_requests SET status='deploy' WHERE status='suspended'")
     conn.commit()
     conn.close()
 
@@ -96,14 +103,66 @@ def batch_delete_played():
 
 
 def restore_last_deleted(record: dict):
-    """Restore a previously deleted/marked record by re-inserting it."""
+    """Restore a previously deleted/marked record. If restoring to pending, put at end of queue."""
     conn = _connect()
+    target_status = record.get("status", "pending")
+    # When restoring to pending, always put at end of queue
+    if target_status == "pending":
+        cur = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM song_requests")
+        new_order = cur.fetchone()[0]
+    else:
+        new_order = record.get("sort_order", 0)
     conn.execute(
         "INSERT INTO song_requests (song_name, sender_name, battery, bv_number, status, sort_order) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (record["song_name"], record.get("sender_name", ""),
          record.get("battery", 0), record.get("bv_number", ""),
-         record.get("status", "pending"), record.get("sort_order", 0))
+         target_status, new_order)
     )
+    conn.commit()
+    conn.close()
+
+
+def mark_deploy(song_id: int):
+    conn = _connect()
+    conn.execute("UPDATE song_requests SET status='deploy' WHERE id=?", (song_id,))
+    conn.commit()
+    conn.close()
+
+
+def move_to_pending_end(song_id: int):
+    """Move a deploy song back to pending at the end of the queue."""
+    conn = _connect()
+    cur = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM song_requests")
+    new_order = cur.fetchone()[0]
+    conn.execute(
+        "UPDATE song_requests SET status='pending', sort_order=? WHERE id=?",
+        (new_order, song_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_deploy_songs() -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM song_requests WHERE status='deploy' ORDER BY sort_order ASC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_sort_order(song_id: int, new_order: int):
+    conn = _connect()
+    conn.execute("UPDATE song_requests SET sort_order=? WHERE id=?", (new_order, song_id))
+    conn.commit()
+    conn.close()
+
+
+def reorder_pending(ordered_ids: list[int]):
+    """Rewrite sort_order for pending songs based on the given id list order."""
+    conn = _connect()
+    for i, sid in enumerate(ordered_ids):
+        conn.execute("UPDATE song_requests SET sort_order=? WHERE id=?", (i, sid))
     conn.commit()
     conn.close()

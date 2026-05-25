@@ -1,7 +1,7 @@
 import re
 import webbrowser
 
-BV_PATTERN = re.compile(r'BV[0-9a-zA-Z]+')
+BV_PATTERN = re.compile(r'BV[0-9a-zA-Z]+', re.IGNORECASE)
 
 
 def is_bv_number(text: str) -> bool:

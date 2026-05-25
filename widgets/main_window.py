@@ -72,7 +72,7 @@ class MainWindow(QMainWindow):
         self.table.cellClicked.connect(self.on_cell_clicked)
         layout.addWidget(self.table)
 
-        self.status_to_text = {"pending": "⏳ 待播", "played": "✅ 已播", "skipped": "⏭ 跳过"}
+        self.status_to_text = {"pending": "⏳ 待播", "played": "✅ 已播", "skipped": "⏭ 跳过", "deploy": "⏸ 部署"}
 
     def refresh_table(self):
         songs = db.get_all_songs()

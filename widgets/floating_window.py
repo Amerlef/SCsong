@@ -1,8 +1,10 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                    QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-                                   QSlider, QMenu, QSizeGrip, QFrame)
-from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QRect
-from PySide6.QtGui import QFont, QShortcut, QKeySequence, QCursor
+                                   QSlider, QMenu, QSizeGrip, QFrame, QAbstractItemView,
+                                   QGraphicsOpacityEffect)
+from PySide6.QtCore import (Qt, Signal, QTimer, QPoint, QMimeData,
+                              QPropertyAnimation, QEasingCurve)
+from PySide6.QtGui import QFont, QShortcut, QKeySequence, QCursor, QDrag
 
 import models.song_model as db
 from utils.clipboard import copy_to_clipboard
@@ -10,32 +12,27 @@ from utils.bv_handler import is_bv_number, open_bv_video, extract_bv_number
 from utils.config import load_config, save_config
 
 
-class Toast(QWidget):
-    """Floating toast notification for copy feedback."""
+class _DragListWidget(QListWidget):
+    """QListWidget that emits a signal when an item is dropped from another list."""
 
-    def __init__(self, parent: QWidget, text: str):
+    item_dropped_from_other = Signal(int)
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
 
-        label = QLabel(text, self)
-        label.setStyleSheet(
-            "background:#dd4444;color:#fff;padding:6px 14px;"
-            "border-radius:6px;font-size:13px;font-weight:bold;"
-        )
-        label.setFont(QFont("Microsoft YaHei", 10))
-        label.adjustSize()
-        self.resize(label.size())
-
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self.close)
-
-    def show_at(self, pos: QPoint):
-        self.move(pos)
-        self.show()
-        self._timer.start(1500)
+    def dropEvent(self, event):
+        source = event.source()
+        if source is not None and source is not self:
+            item = source.currentItem()
+            if item:
+                song_id = item.data(Qt.UserRole)
+                self.item_dropped_from_other.emit(song_id)
+                event.accept()
+                return
+        super().dropEvent(event)
 
 
 class FloatingWindow(QWidget):
@@ -47,7 +44,7 @@ class FloatingWindow(QWidget):
         self._config = load_config()
 
         w = self._config.get("float_width", 320)
-        h = self._config.get("float_height", 500)
+        h = self._config.get("float_height", 550)
         self._bg_r = self._config.get("bg_r", 42)
         self._bg_g = self._config.get("bg_g", 42)
         self._bg_b = self._config.get("bg_b", 62)
@@ -61,166 +58,101 @@ class FloatingWindow(QWidget):
 
         self._undo_stack: list[dict] = []
         self._drag_pos: QPoint | None = None
-        self._resize_grip: QSizeGrip | None = None
         self._settings_visible = False
 
         self.setup_ui()
-        self.refresh_list()
+        self.refresh_all()
 
-    # ---- Stylesheet builder ----
-    def _bg_rgba(self, alpha: int | None = None) -> str:
-        a = alpha if alpha is not None else self._bg_alpha
-        return f"rgba({self._bg_r},{self._bg_g},{self._bg_b},{a})"
+    # ---- Style ----
+    def _bg_rgba(self) -> str:
+        return f"rgba({self._bg_r},{self._bg_g},{self._bg_b},{self._bg_alpha})"
 
     def _apply_style(self):
-        """Rebuild stylesheet with current colors."""
         bg1 = self._bg_rgba()
-        # slightly lighter variant for gradient
-        r2 = min(self._bg_r + 20, 255)
-        g2 = min(self._bg_g + 20, 255)
-        b2 = min(self._bg_b + 20, 255)
+        r2, g2, b2 = min(self._bg_r + 20, 255), min(self._bg_g + 20, 255), min(self._bg_b + 20, 255)
         bg2 = f"rgba({r2},{g2},{b2},{self._bg_alpha})"
-
-        border_c = f"rgba({min(self._bg_r+40,255)},{min(self._bg_g+40,255)},{min(self._bg_b+40,255)},180)"
+        border = f"rgba({min(self._bg_r+40,255)},{min(self._bg_g+40,255)},{min(self._bg_b+40,255)},180)"
 
         self.setStyleSheet(f"""
             QWidget#floating_root {{
-                background: qlineargradient(x1:0,y1:0, x2:0,y2:1,
-                    stop:0 {bg1}, stop:1 {bg2});
-                border-radius: 12px;
-                border: 1px solid {border_c};
+                background: qlineargradient(x1:0,y1:0, x2:0,y2:1, stop:0 {bg1}, stop:1 {bg2});
+                border-radius: 12px; border: 1px solid {border};
             }}
             QListWidget {{
-                background: transparent;
-                border: none;
-                outline: none;
-                color: #e8e8f0;
-                font-size: 13px;
+                background: transparent; border: none; outline: none;
+                color: #e8e8f0; font-size: 13px;
             }}
             QListWidget::item {{
                 background: rgba(255,255,255,0.05);
                 border-bottom: 1px solid rgba(255,255,255,0.06);
-                padding: 8px 10px;
-                border-radius: 4px;
+                padding: 6px 8px; border-radius: 4px;
             }}
-            QListWidget::item:hover {{
-                background: rgba(255,255,255,0.12);
-            }}
-            QListWidget::item:selected {{
-                background: rgba(180,160,255,0.25);
-            }}
+            QListWidget::item:hover {{ background: rgba(255,255,255,0.12); }}
+            QListWidget::item:selected {{ background: rgba(180,160,255,0.25); }}
             QPushButton {{
-                background: rgba(255,255,255,0.08);
-                color: #d0d0e0;
-                border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-size: 12px;
+                background: rgba(255,255,255,0.08); color: #d0d0e0;
+                border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;
+                padding: 6px 10px; font-size: 12px;
             }}
-            QPushButton:hover {{
-                background: rgba(255,255,255,0.16);
-                color: #fff;
-            }}
+            QPushButton:hover {{ background: rgba(255,255,255,0.16); color: #fff; }}
             QPushButton#settings_btn {{
-                background: transparent;
-                border: none;
-                font-size: 15px;
-                padding: 2px 6px;
+                background: transparent; border: none; font-size: 15px; padding: 2px 6px;
             }}
-            QPushButton#settings_btn:hover {{
-                background: rgba(255,255,255,0.1);
-            }}
+            QPushButton#settings_btn:hover {{ background: rgba(255,255,255,0.1); }}
             QPushButton#complete_btn {{
-                background: rgba(100,200,120,0.20);
-                border-color: rgba(100,200,120,0.35);
-                color: #a0e0b0;
+                background: rgba(100,200,120,0.20); border-color: rgba(100,200,120,0.35); color: #a0e0b0;
             }}
-            QPushButton#complete_btn:hover {{
-                background: rgba(100,200,120,0.35);
-            }}
+            QPushButton#complete_btn:hover {{ background: rgba(100,200,120,0.35); }}
             QPushButton#undo_btn {{
-                background: rgba(200,160,60,0.20);
-                border-color: rgba(200,160,60,0.35);
-                color: #e0c080;
+                background: rgba(200,160,60,0.20); border-color: rgba(200,160,60,0.35); color: #e0c080;
             }}
-            QPushButton#undo_btn:hover {{
-                background: rgba(200,160,60,0.35);
-            }}
+            QPushButton#undo_btn:hover {{ background: rgba(200,160,60,0.35); }}
             QPushButton#add_btn {{
-                background: rgba(120,140,220,0.20);
-                border-color: rgba(120,140,220,0.35);
-                color: #a0b0f0;
+                background: rgba(120,140,220,0.20); border-color: rgba(120,140,220,0.35); color: #a0b0f0;
             }}
-            QPushButton#add_btn:hover {{
-                background: rgba(120,140,220,0.35);
-            }}
+            QPushButton#add_btn:hover {{ background: rgba(120,140,220,0.35); }}
             QLineEdit {{
-                background: rgba(255,255,255,0.07);
-                color: #e8e8f0;
-                border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-size: 12px;
+                background: rgba(255,255,255,0.07); color: #e8e8f0;
+                border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;
+                padding: 6px 10px; font-size: 12px;
             }}
-            QLineEdit:focus {{
-                border-color: rgba(140,140,220,0.6);
-            }}
+            QLineEdit:focus {{ border-color: rgba(140,140,220,0.6); }}
             QSlider::groove:horizontal {{
-                height: 4px;
-                background: rgba(255,255,255,0.1);
-                border-radius: 2px;
+                height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px;
             }}
             QSlider::handle:horizontal {{
-                width: 12px;
-                height: 12px;
-                margin: -4px 0;
-                background: #8888cc;
-                border-radius: 6px;
+                width: 12px; height: 12px; margin: -4px 0;
+                background: #8888cc; border-radius: 6px;
             }}
-            QSlider::handle:horizontal:hover {{
-                background: #aaaadd;
-            }}
+            QSlider::handle:horizontal:hover {{ background: #aaaadd; }}
             QFrame#settings_panel {{
-                background: rgba(0,0,0,0.25);
-                border-radius: 8px;
-                padding: 4px;
+                background: rgba(0,0,0,0.25); border-radius: 8px; padding: 4px;
             }}
-            QLabel#title_label {{
-                color: #ccccee;
-                font-size: 13px;
-                font-weight: bold;
-            }}
-            QLabel#sub_label {{
-                color: #8888aa;
-                font-size: 11px;
-            }}
-            QLabel#setting_label {{
-                color: #aaaacc;
-                font-size: 11px;
+            QLabel#title_label {{ color: #ccccee; font-size: 13px; font-weight: bold; }}
+            QLabel#sub_label {{ color: #8888aa; font-size: 11px; }}
+            QLabel#setting_label {{ color: #aaaacc; font-size: 10px; min-width: 16px; }}
+            QLabel#section_label {{
+                color: #9999bb; font-size: 11px; font-weight: bold; padding: 4px 0 2px 4px;
             }}
         """)
 
     def setup_ui(self):
-        # Main container
-        container = QWidget(self)
-        container.setObjectName("floating_root")
-        container.setGeometry(2, 2, self.width() - 4, self.height() - 4)
+        self._container = QWidget(self)
+        self._container.setObjectName("floating_root")
+        self._container.setGeometry(2, 2, self.width() - 4, self.height() - 4)
 
-        layout = QVBoxLayout(container)
+        layout = QVBoxLayout(self._container)
         layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
 
         # --- Header ---
         header = QHBoxLayout()
         title = QLabel("点歌队列")
         title.setObjectName("title_label")
         header.addWidget(title)
-
-        count_label = QLabel("")
-        count_label.setObjectName("sub_label")
-        header.addWidget(count_label)
-        self._count_label = count_label
-
+        self._count_label = QLabel("")
+        self._count_label.setObjectName("sub_label")
+        header.addWidget(self._count_label)
         header.addStretch()
 
         settings_btn = QPushButton("⚙")
@@ -228,88 +160,77 @@ class FloatingWindow(QWidget):
         settings_btn.setToolTip("显示设置")
         settings_btn.clicked.connect(self._toggle_settings)
         header.addWidget(settings_btn)
-
         layout.addLayout(header)
 
-        # --- Settings panel (hidden by default) ---
+        # --- Settings panel ---
         self._settings_panel = QFrame()
         self._settings_panel.setObjectName("settings_panel")
         self._settings_panel.setVisible(False)
         s_layout = QVBoxLayout(self._settings_panel)
-        s_layout.setContentsMargins(8, 6, 8, 6)
-        s_layout.setSpacing(6)
+        s_layout.setContentsMargins(8, 4, 8, 4)
+        s_layout.setSpacing(3)
 
-        # Row: width / height
-        wh_row = QHBoxLayout()
-        wh_row.addWidget(QLabel("宽"))
-        w_slider = QSlider(Qt.Horizontal)
-        w_slider.setRange(200, 600)
-        w_slider.setValue(self.width())
-        w_slider.valueChanged.connect(self._on_width_change)
-        wh_row.addWidget(w_slider)
-        self._w_label = QLabel(str(self.width()))
-        self._w_label.setObjectName("setting_label")
-        self._w_label.setFixedWidth(28)
-        wh_row.addWidget(self._w_label)
-
-        wh_row.addWidget(QLabel("高"))
-        h_slider = QSlider(Qt.Horizontal)
-        h_slider.setRange(200, 800)
-        h_slider.setValue(self.height())
-        h_slider.valueChanged.connect(self._on_height_change)
-        wh_row.addWidget(h_slider)
-        self._h_label = QLabel(str(self.height()))
-        self._h_label.setObjectName("setting_label")
-        self._h_label.setFixedWidth(28)
-        wh_row.addWidget(self._h_label)
-        s_layout.addLayout(wh_row)
-
-        # Row: transparency (background alpha)
-        tp_row = QHBoxLayout()
-        tp_row.addWidget(QLabel("透明"))
-        a_slider = QSlider(Qt.Horizontal)
-        a_slider.setRange(60, 255)
-        a_slider.setValue(self._bg_alpha)
-        a_slider.valueChanged.connect(self._on_alpha_change)
-        tp_row.addWidget(a_slider)
-        self._a_label = QLabel(str(self._bg_alpha))
-        self._a_label.setObjectName("setting_label")
-        self._a_label.setFixedWidth(28)
-        tp_row.addWidget(self._a_label)
-        s_layout.addLayout(tp_row)
-
-        # Row: R / G / B
-        for label, getter, setter_key in [
-            ("R", self._bg_r, "bg_r"),
-            ("G", self._bg_g, "bg_g"),
-            ("B", self._bg_b, "bg_b"),
-        ]:
+        def _make_row(label_text, min_v, max_v, init_v, callback):
             row = QHBoxLayout()
-            row.addWidget(QLabel(label))
+            row.setSpacing(4)
+            lbl = QLabel(label_text)
+            lbl.setObjectName("setting_label")
+            lbl.setFixedWidth(14)
+            row.addWidget(lbl)
             slider = QSlider(Qt.Horizontal)
-            slider.setRange(0, 120)
-            slider.setValue(getattr(self, f"_bg_{label.lower()}"))
-            slider.valueChanged.connect(
-                lambda v, c=label.lower(): self._on_rgb_change(c, v)
-            )
-            row.addWidget(slider)
-            val_label = QLabel(str(getattr(self, f"_bg_{label.lower()}")))
-            val_label.setObjectName("setting_label")
-            val_label.setFixedWidth(28)
-            row.addWidget(val_label)
-            setattr(self, f"_{label.lower()}_label", val_label)
+            slider.setRange(min_v, max_v)
+            slider.setValue(init_v)
+            slider.valueChanged.connect(callback)
+            row.addWidget(slider, stretch=1)
+            val = QLabel(str(init_v))
+            val.setObjectName("setting_label")
+            val.setFixedWidth(24)
+            row.addWidget(val)
+            return row, slider, val
+
+        row, self._h_slider, self._h_label = _make_row("高", 390, 800, self.height(), self._on_height_change)
+        s_layout.addLayout(row)
+        row, self._w_slider, self._w_label = _make_row("宽", 200, 600, self.width(), self._on_width_change)
+        s_layout.addLayout(row)
+        row, self._a_slider, self._a_label = _make_row("透", 60, 255, self._bg_alpha, self._on_alpha_change)
+        s_layout.addLayout(row)
+
+        for ch, key in [("R", "bg_r"), ("G", "bg_g"), ("B", "bg_b")]:
+            init = self._config.get(key, 42)
+            row, slider, vlabel = _make_row(ch, 0, 205, init, lambda v, c=key: self._on_rgb_change(c, v))
+            setattr(self, f"_{key}_label", vlabel)
             s_layout.addLayout(row)
 
         layout.addWidget(self._settings_panel)
 
-        # --- Song list ---
-        self.list_widget = QListWidget()
-        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.list_widget.customContextMenuRequested.connect(self.on_context_menu)
-        self.list_widget.itemClicked.connect(self.on_item_clicked)
-        layout.addWidget(self.list_widget, stretch=1)
+        # --- Pending queue ---
+        pend_label = QLabel("待播队列（可拖拽排序，拖入下方可部署）")
+        pend_label.setObjectName("section_label")
+        layout.addWidget(pend_label)
 
-        # --- Input bar ---
+        self.list_widget = _DragListWidget()
+        self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_widget.setDefaultDropAction(Qt.MoveAction)
+        self.list_widget.item_dropped_from_other.connect(self._on_dropped_to_pending)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._on_pending_menu)
+        self.list_widget.itemClicked.connect(self.on_item_clicked)
+        self.list_widget.model().rowsMoved.connect(self._on_rows_reordered)
+        layout.addWidget(self.list_widget, stretch=3)
+
+        # --- Deploy section ---
+        depl_label = QLabel("部署（预约播放，拖入上方可加入队列）")
+        depl_label.setObjectName("section_label")
+        layout.addWidget(depl_label)
+
+        self.depl_list = _DragListWidget()
+        self.depl_list.item_dropped_from_other.connect(self._on_dropped_to_deploy)
+        self.depl_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.depl_list.customContextMenuRequested.connect(self._on_deploy_menu)
+        self.depl_list.itemClicked.connect(self.on_item_clicked)
+        layout.addWidget(self.depl_list, stretch=1)
+
+        # --- Input ---
         input_layout = QHBoxLayout()
         self.input_box = QLineEdit()
         self.input_box.setPlaceholderText("歌名或 BV 号，回车添加")
@@ -333,22 +254,69 @@ class FloatingWindow(QWidget):
         add_btn.setObjectName("add_btn")
         add_btn.clicked.connect(self.on_add_clicked)
         btn_layout.addWidget(add_btn)
-
         layout.addLayout(btn_layout)
 
-        # Size grip (bottom-right corner)
+        # --- Toast label (Android-style bottom toast) ---
+        self._toast = QLabel(self._container)
+        self._toast.setAlignment(Qt.AlignCenter)
+        self._toast.setStyleSheet(
+            "background: rgba(40,40,40,220); color: #fff; padding: 10px 22px;"
+            "border-radius: 10px; font-size: 13px;"
+        )
+        self._toast.setFont(QFont("Microsoft YaHei", 10))
+        self._toast.hide()
+        self._toast_opacity = QGraphicsOpacityEffect(self._toast)
+        self._toast_opacity.setOpacity(0.0)
+        self._toast.setGraphicsEffect(self._toast_opacity)
+
+        # Size grip
         grip = QSizeGrip(self)
         grip.setFixedSize(14, 14)
         grip.setStyleSheet("background: transparent;")
         grip.move(self.width() - 16, self.height() - 16)
 
-        # Keyboard shortcuts
         QShortcut(QKeySequence("Ctrl+N"), self, self.on_add_clicked)
         QShortcut(QKeySequence(Qt.Key_Delete), self, self.on_complete_first)
 
         self._apply_style()
 
-    # ---- Settings handlers ----
+    # ---- Toast ----
+    def _show_toast(self, msg: str):
+        """Show an Android-style toast at the bottom of the floating window."""
+        self._toast.setText(msg)
+        self._toast.adjustSize()
+
+        # Position: centered at bottom of container
+        cw = self._container.width()
+        ch = self._container.height()
+        tx = (cw - self._toast.width()) // 2
+        ty = ch - self._toast.height() - 20
+        self._toast.move(tx, ty)
+        self._toast.show()
+        self._toast.raise_()
+
+        # Fade in
+        self._toast_opacity.setOpacity(0.0)
+        anim_in = QPropertyAnimation(self._toast_opacity, b"opacity", self)
+        anim_in.setDuration(200)
+        anim_in.setStartValue(0.0)
+        anim_in.setEndValue(1.0)
+        anim_in.setEasingCurve(QEasingCurve.OutCubic)
+        anim_in.start()
+
+        # Fade out after 1.5s
+        def _fade_out():
+            anim_out = QPropertyAnimation(self._toast_opacity, b"opacity", self)
+            anim_out.setDuration(300)
+            anim_out.setStartValue(1.0)
+            anim_out.setEndValue(0.0)
+            anim_out.setEasingCurve(QEasingCurve.InCubic)
+            anim_out.finished.connect(self._toast.hide)
+            anim_out.start()
+
+        QTimer.singleShot(1500, _fade_out)
+
+    # ---- Settings ----
     def _toggle_settings(self):
         self._settings_visible = not self._settings_visible
         self._settings_panel.setVisible(self._settings_visible)
@@ -372,10 +340,10 @@ class FloatingWindow(QWidget):
         save_config(self._config)
         self._apply_style()
 
-    def _on_rgb_change(self, channel: str, v: int):
-        setattr(self, f"_bg_{channel}", v)
-        self._config[f"bg_{channel}"] = v
-        label = getattr(self, f"_{channel}_label", None)
+    def _on_rgb_change(self, key: str, v: int):
+        setattr(self, f"_{key}", v)
+        self._config[key] = v
+        label = getattr(self, f"_{key}_label", None)
         if label:
             label.setText(str(v))
         save_config(self._config)
@@ -400,120 +368,157 @@ class FloatingWindow(QWidget):
         c = self.findChild(QWidget, "floating_root")
         if c:
             c.setGeometry(2, 2, self.width() - 4, self.height() - 4)
-        # Reposition size grip
         for child in self.children():
             if isinstance(child, QSizeGrip):
                 child.move(self.width() - 16, self.height() - 16)
         super().resizeEvent(event)
 
-    # ---- Data refresh ----
-    def refresh_list(self):
-        self.list_widget.clear()
-        songs = db.get_pending_songs()
+    # ---- Cross-list drag-drop ----
+    def _on_dropped_to_pending(self, song_id: int):
+        self._undo_stack.append(
+            dict(next((s for s in db.get_deploy_songs() if s["id"] == song_id), {}))
+        )
+        db.move_to_pending_end(song_id)
+        self.refresh_all()
+        self.data_changed.emit()
+
+    def _on_dropped_to_deploy(self, song_id: int):
+        self._undo_stack.append(
+            dict(next((s for s in db.get_pending_songs() if s["id"] == song_id), {}))
+        )
+        db.mark_deploy(song_id)
+        self.refresh_all()
+        self.data_changed.emit()
+
+    # ---- Internal reorder ----
+    def _on_rows_reordered(self):
+        ids = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            ids.append(item.data(Qt.UserRole))
+        db.reorder_pending(ids)
+        self.data_changed.emit()
+
+    # ---- Refresh ----
+    def refresh_all(self):
+        self._refresh_list(self.list_widget, db.get_pending_songs())
+        self._refresh_list(self.depl_list, db.get_deploy_songs())
+        pending = db.get_pending_songs()
+        depl = db.get_deploy_songs()
+        self._count_label.setText(f"待播 {len(pending)}  ·  部署 {len(depl)}")
+
+    def _refresh_list(self, widget: QListWidget, songs: list[dict]):
+        widget.clear()
         for i, s in enumerate(songs):
             text = f"{i + 1}. {s['song_name']}"
             if s.get("sender_name"):
                 text += f"  — {s['sender_name']}"
             if s.get("battery"):
                 text += f"  [{s['battery']}⚡]"
-
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, s["id"])
-            item.setToolTip("左键点击复制歌名  |  右键更多操作")
-            self.list_widget.addItem(item)
+            item.setToolTip("左键复制  |  右键菜单  |  拖拽移动")
+            widget.addItem(item)
 
-        self._count_label.setText(f"共 {len(songs)} 首")
-
-    # ---- Interactions ----
+    # ---- Item click (copy) ----
     def _get_song_from_item(self, item: QListWidgetItem) -> dict | None:
         song_id = item.data(Qt.UserRole)
-        songs = db.get_pending_songs()
-        return next((s for s in songs if s["id"] == song_id), None)
+        all_songs = db.get_pending_songs() + db.get_deploy_songs()
+        return next((s for s in all_songs if s["id"] == song_id), None)
 
     def on_item_clicked(self, item: QListWidgetItem):
         song = self._get_song_from_item(item)
         if song:
             copy_to_clipboard(song["song_name"])
-            toast = Toast(None, f"已复制: {song['song_name']}")
-            toast.show_at(QCursor.pos() + QPoint(10, 10))
+            self._show_toast(f"已复制: {song['song_name']}")
 
-    def on_context_menu(self, pos):
+    # ---- Context menus ----
+    def _on_pending_menu(self, pos):
         item = self.list_widget.itemAt(pos)
         if not item:
             return
-
         song = self._get_song_from_item(item)
         if not song:
             return
+        self._show_menu(song, is_deploy=False)
 
+    def _on_deploy_menu(self, pos):
+        item = self.depl_list.itemAt(pos)
+        if not item:
+            return
+        song = self._get_song_from_item(item)
+        if not song:
+            return
+        self._show_menu(song, is_deploy=True)
+
+    def _show_menu(self, song: dict, is_deploy: bool):
         menu = QMenu(self)
         menu.setStyleSheet("""
-            QMenu {
-                background: #2a2a3e;
-                border: 1px solid #5a5a7a;
-                border-radius: 6px;
-                padding: 4px;
-                color: #e0e0f0;
-            }
-            QMenu::item {
-                padding: 6px 28px 6px 16px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background: rgba(140,140,220,0.3);
-            }
-            QMenu::separator {
-                height: 1px;
-                background: rgba(255,255,255,0.08);
-                margin: 3px 8px;
-            }
+            QMenu { background: #2a2a3e; border: 1px solid #5a5a7a; border-radius: 6px;
+                    padding: 4px; color: #e0e0f0; }
+            QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; }
+            QMenu::item:selected { background: rgba(140,140,220,0.3); }
+            QMenu::separator { height: 1px; background: rgba(255,255,255,0.08); margin: 3px 8px; }
         """)
 
-        copy_action = menu.addAction("📋  复制歌名")
+        sid = song["id"]
 
+        a_copy = menu.addAction("📋  复制歌名")
         menu.addSeparator()
 
-        status_menu = QMenu("状态标记", menu)
-        status_menu.setStyleSheet(menu.styleSheet())
-        play_action = status_menu.addAction("✅  标记已播")
-        skip_action = status_menu.addAction("⏭  标记跳过")
-        pend_action = status_menu.addAction("🔄  恢复待播")
-        menu.addMenu(status_menu)
+        if is_deploy:
+            a_move = menu.addAction("🔽  移回待播队尾")
+        else:
+            a_played = menu.addAction("✅  标记已播")
+            a_skip = menu.addAction("⏭  标记跳过")
+            a_deploy = menu.addAction("⏸  移到部署区")
 
         menu.addSeparator()
-        del_action = menu.addAction("🗑  删除")
-        undo_action = menu.addAction("↩  撤回")
+        a_del = menu.addAction("🗑  删除")
+        a_undo = menu.addAction("↩  撤回")
 
-        action = menu.exec(self.list_widget.viewport().mapToGlobal(pos))
+        action = menu.exec(QCursor.pos())
+        if not action:
+            return
 
-        if action == copy_action:
+        if action == a_copy:
             copy_to_clipboard(song["song_name"])
-            toast = Toast(None, f"已复制: {song['song_name']}")
-            toast.show_at(QCursor.pos() + QPoint(10, 10))
-        elif action == play_action:
+            self._show_toast(f"已复制: {song['song_name']}")
+
+        elif not is_deploy and action == a_played:
             self._undo_stack.append(dict(song))
-            db.mark_played(song["id"])
-            self.refresh_list()
+            db.mark_played(sid)
+            self.refresh_all()
             self.data_changed.emit()
-        elif action == skip_action:
+
+        elif not is_deploy and action == a_skip:
             self._undo_stack.append(dict(song))
-            db.mark_skipped(song["id"])
-            self.refresh_list()
+            db.mark_skipped(sid)
+            self.refresh_all()
             self.data_changed.emit()
-        elif action == pend_action:
-            db.restore_last_deleted(song)
-            db.delete_song(song["id"])
-            self.refresh_list()
-            self.data_changed.emit()
-        elif action == del_action:
+
+        elif not is_deploy and action == a_deploy:
             self._undo_stack.append(dict(song))
-            db.delete_song(song["id"])
-            self.refresh_list()
+            db.mark_deploy(sid)
+            self.refresh_all()
             self.data_changed.emit()
-        elif action == undo_action:
+
+        elif is_deploy and action == a_move:
+            self._undo_stack.append(dict(song))
+            db.move_to_pending_end(sid)
+            self.refresh_all()
+            self.data_changed.emit()
+
+        elif action == a_del:
+            self._undo_stack.append(dict(song))
+            db.delete_song(sid)
+            self.refresh_all()
+            self.data_changed.emit()
+
+        elif action == a_undo:
             self.on_undo()
 
-    # ---- Actions ----
+    # ---- Input / Add ----
     def on_input_submit(self):
         text = self.input_box.text().strip()
         if not text:
@@ -525,7 +530,7 @@ class FloatingWindow(QWidget):
             open_bv_video(bv)
 
         db.add_song(text)
-        self.refresh_list()
+        self.refresh_all()
         self.data_changed.emit()
         self.song_added.emit()
 
@@ -538,6 +543,7 @@ class FloatingWindow(QWidget):
                 return
             song_name = data["song_name"]
             bv_number = ""
+            add_to_deploy = data.get("to_deploy", False)
 
             if is_bv_number(song_name):
                 bv_number = song_name
@@ -554,7 +560,12 @@ class FloatingWindow(QWidget):
                     open_bv_video(bv)
 
             db.add_song(song_name, data["sender_name"], data["battery"], bv_number)
-            self.refresh_list()
+            if add_to_deploy:
+                songs = db.get_pending_songs()
+                if songs:
+                    db.mark_deploy(songs[-1]["id"])
+
+            self.refresh_all()
             self.data_changed.emit()
             self.song_added.emit()
 
@@ -565,7 +576,7 @@ class FloatingWindow(QWidget):
         first = pending[0]
         self._undo_stack.append(dict(first))
         db.mark_played(first["id"])
-        self.refresh_list()
+        self.refresh_all()
         self.data_changed.emit()
 
     def on_undo(self):
@@ -573,5 +584,5 @@ class FloatingWindow(QWidget):
             return
         record = self._undo_stack.pop()
         db.restore_last_deleted(record)
-        self.refresh_list()
+        self.refresh_all()
         self.data_changed.emit()

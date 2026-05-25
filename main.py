@@ -45,7 +45,11 @@ def apply_dark_theme(app: QApplication):
 
 
 def main():
-    os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"), exist_ok=True)
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.join(base_dir, "data"), exist_ok=True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("SuperChat 点歌记录")
@@ -63,10 +67,10 @@ def main():
 
     # Sync signals: when one window changes data, refresh the other
     floating.data_changed.connect(main_win.refresh_table)
-    main_win.data_changed.connect(floating.refresh_list)
+    main_win.data_changed.connect(floating.refresh_all)
 
     floating.song_added.connect(main_win.refresh_table)
-    main_win.song_added.connect(floating.refresh_list)
+    main_win.song_added.connect(floating.refresh_all)
 
     # System tray
     tray_icon = QSystemTrayIcon()
