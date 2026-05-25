@@ -5,9 +5,9 @@ from datetime import datetime
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                 QPushButton, QTableWidget, QTableWidgetItem,
                                 QHeaderView, QMenu, QMessageBox, QFileDialog,
-                                QAbstractItemView)
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QShortcut, QKeySequence
+                                QAbstractItemView, QLabel, QGraphicsOpacityEffect)
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QShortcut, QKeySequence, QFont
 
 import models.song_model as db
 from utils.clipboard import copy_to_clipboard
@@ -36,11 +36,11 @@ class MainWindow(QMainWindow):
         add_btn.clicked.connect(self.on_add)
         toolbar.addWidget(add_btn)
 
-        complete_btn = QPushButton("✓ 标记已播 (首行)")
+        complete_btn = QPushButton("✓ 标记已播")
         complete_btn.clicked.connect(self.on_complete_first)
         toolbar.addWidget(complete_btn)
 
-        batch_btn = QPushButton("🗑 批量清除已完成")
+        batch_btn = QPushButton("🗑 批量清除已播")
         batch_btn.clicked.connect(self.on_batch_delete)
         toolbar.addWidget(batch_btn)
 
@@ -48,12 +48,25 @@ class MainWindow(QMainWindow):
         undo_btn.clicked.connect(self.on_undo)
         toolbar.addWidget(undo_btn)
 
-        export_btn = QPushButton("📤 导出 CSV")
-        export_btn.clicked.connect(self.on_export_csv)
-        toolbar.addWidget(export_btn)
+        # export_btn = QPushButton("📤 导出 CSV")
+        # export_btn.clicked.connect(self.on_export_csv)
+        # toolbar.addWidget(export_btn)
 
         toolbar.addStretch()
         layout.addLayout(toolbar)
+
+        # Toast label (Android-style bottom toast)
+        self._toast = QLabel(central)
+        self._toast.setAlignment(Qt.AlignCenter)
+        self._toast.setStyleSheet(
+            "background: rgba(40,40,40,220); color: #fff; padding: 10px 22px;"
+            "border-radius: 10px; font-size: 13px;"
+        )
+        self._toast.setFont(QFont("Microsoft YaHei", 10))
+        self._toast.hide()
+        self._toast_opacity = QGraphicsOpacityEffect(self._toast)
+        self._toast_opacity.setOpacity(0.0)
+        self._toast.setGraphicsEffect(self._toast_opacity)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Ctrl+N"), self, self.on_add)
@@ -92,11 +105,42 @@ class MainWindow(QMainWindow):
             # Store song id in first column
             self.table.item(i, 0).setData(Qt.UserRole, s["id"])
 
+    def _show_toast(self, msg: str):
+        self._toast.setText(msg)
+        self._toast.adjustSize()
+
+        cw = self.centralWidget().width()
+        ch = self.centralWidget().height()
+        tx = (cw - self._toast.width()) // 2
+        ty = ch - self._toast.height() - 20
+        self._toast.move(tx, ty)
+        self._toast.show()
+        self._toast.raise_()
+
+        self._toast_opacity.setOpacity(0.0)
+        anim_in = QPropertyAnimation(self._toast_opacity, b"opacity", self)
+        anim_in.setDuration(200)
+        anim_in.setStartValue(0.0)
+        anim_in.setEndValue(1.0)
+        anim_in.setEasingCurve(QEasingCurve.OutCubic)
+        anim_in.start()
+
+        def _fade_out():
+            anim_out = QPropertyAnimation(self._toast_opacity, b"opacity", self)
+            anim_out.setDuration(300)
+            anim_out.setStartValue(1.0)
+            anim_out.setEndValue(0.0)
+            anim_out.setEasingCurve(QEasingCurve.InCubic)
+            anim_out.finished.connect(self._toast.hide)
+            anim_out.start()
+
+        QTimer.singleShot(1500, _fade_out)
+
     def on_cell_clicked(self, row: int, col: int):
         if col == 1:  # song name column
             name = self.table.item(row, 1).text()
             copy_to_clipboard(name)
-            self.statusBar().showMessage(f"已复制: {name}", 2000)
+            self._show_toast(f"已复制: {name}")
 
     def on_add(self):
         from widgets.add_dialog import AddDialog
@@ -131,24 +175,38 @@ class MainWindow(QMainWindow):
             self.refresh_table()
             self.data_changed.emit()
             self.song_added.emit()
-            self.statusBar().showMessage(f"已添加: {song_name}", 2000)
+            self._show_toast(f"已添加: {song_name}")
 
     def on_complete_first(self):
+        row = self.table.currentRow()
+        if row >= 0:
+            item = self.table.item(row, 0)
+            if item:
+                song_id = item.data(Qt.UserRole)
+                songs = db.get_all_songs()
+                song = next((s for s in songs if s["id"] == song_id), None)
+                if song:
+                    self._undo_stack.append(dict(song))
+                    db.mark_played(song_id)
+                    self.refresh_table()
+                    self.data_changed.emit()
+                    self._show_toast(f"已标记完成: {song['song_name']}")
+                    return
         pending = db.get_pending_songs()
         if not pending:
-            self.statusBar().showMessage("没有待播歌曲", 2000)
+            self._show_toast("没有待播歌曲")
             return
         first = pending[0]
         self._undo_stack.append(dict(first))
         db.mark_played(first["id"])
         self.refresh_table()
         self.data_changed.emit()
-        self.statusBar().showMessage(f"已标记完成: {first['song_name']}", 2000)
+        self._show_toast(f"已标记完成: {first['song_name']}")
 
     def on_batch_delete(self):
         songs_to_delete = [s for s in db.get_all_songs() if s["status"] in ("played", "skipped")]
         if not songs_to_delete:
-            self.statusBar().showMessage("没有已完成/已跳过的记录", 2000)
+            self._show_toast("没有已完成/已跳过的记录")
             return
         reply = QMessageBox.question(
             self, "确认", f"确定要删除 {len(songs_to_delete)} 条已完成的记录吗？",
@@ -159,17 +217,17 @@ class MainWindow(QMainWindow):
             db.batch_delete_played()
             self.refresh_table()
             self.data_changed.emit()
-            self.statusBar().showMessage(f"已删除 {len(songs_to_delete)} 条记录", 2000)
+            self._show_toast(f"已删除 {len(songs_to_delete)} 条记录")
 
     def on_undo(self):
         if not self._undo_stack:
-            self.statusBar().showMessage("没有可撤回的操作", 2000)
+            self._show_toast("没有可撤回的操作")
             return
         record = self._undo_stack.pop()
         db.restore_last_deleted(record)
         self.refresh_table()
         self.data_changed.emit()
-        self.statusBar().showMessage(f"已撤回: {record.get('song_name', '')}", 2000)
+        self._show_toast(f"已撤回: {record.get('song_name', '')}")
 
     def on_export_csv(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -189,7 +247,7 @@ class MainWindow(QMainWindow):
                     self.status_to_text.get(s["status"], s["status"]),
                     s.get("created_at", "")
                 ])
-        self.statusBar().showMessage(f"已导出: {path}", 3000)
+        self._show_toast(f"已导出: {path}", 3000)
 
     def on_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
@@ -219,7 +277,7 @@ class MainWindow(QMainWindow):
 
         if action == copy_action:
             copy_to_clipboard(song["song_name"])
-            self.statusBar().showMessage(f"已复制: {song['song_name']}", 2000)
+            self._show_toast(f"已复制: {song['song_name']}")
         elif action == play_action:
             self._undo_stack.append(dict(song))
             db.mark_played(song_id)

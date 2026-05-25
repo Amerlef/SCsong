@@ -43,12 +43,12 @@ class FloatingWindow(QWidget):
         super().__init__()
         self._config = load_config()
 
-        w = self._config.get("float_width", 320)
+        w = self._config.get("float_width", 265)
         h = self._config.get("float_height", 550)
-        self._bg_r = self._config.get("bg_r", 42)
-        self._bg_g = self._config.get("bg_g", 42)
-        self._bg_b = self._config.get("bg_b", 62)
-        self._bg_alpha = self._config.get("bg_alpha", 230)
+        self._bg_r = self._config.get("bg_r", 97)
+        self._bg_g = self._config.get("bg_g", 97)
+        self._bg_b = self._config.get("bg_b", 97)
+        self._bg_alpha = self._config.get("bg_alpha", 198)
 
         self.resize(w, h)
         self.setWindowFlags(

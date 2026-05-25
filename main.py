@@ -54,7 +54,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SuperChat 点歌记录")
     app.setOrganizationName("SCsong")
-
+    app.setWindowIcon(QIcon("icon.png"))
     config = load_config()
     if config.get("dark_theme", True):
         apply_dark_theme(app)
